@@ -185,20 +185,26 @@ export default function Home() {
     setMessage({ kind, text });
   }
 
-  // 首次进入：读取本地保存的口令，直接校验解锁
+  // 首次进入：无口令门时直接进入；有口令门时用保存的口令自动解锁
   useEffect(() => {
-    const saved = getStoredCode();
-    if (!saved) return;
     fetch("/api/verify", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accessCode: saved }),
+      body: JSON.stringify({ accessCode: getStoredCode() }),
     })
       .then(async (r) => {
         const j = await r.json().catch(() => ({}));
         if (r.ok && j.ok) {
-          setAccessCode(saved);
-          setUnlocked(true);
+          if (!j.gate) {
+            // 未启用口令门：直接进入，无需口令
+            setUnlocked(true);
+            return;
+          }
+          const saved = getStoredCode();
+          if (saved) {
+            setAccessCode(saved);
+            setUnlocked(true);
+          }
         } else {
           try {
             localStorage.removeItem(CODE_KEY);
