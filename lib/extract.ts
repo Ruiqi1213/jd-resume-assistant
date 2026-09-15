@@ -30,26 +30,31 @@ export function detectKind(filename: string, mime: string): ParseKind {
 }
 
 export async function parsePdfBuffer(buffer: Buffer): Promise<string> {
-  // 服务端禁用 worker：Vercel 等 serverless 环境没有 worker 文件，主线程解析即可
-  const mod = await import("pdfjs-dist/legacy/build/pdf.mjs");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const pdfjs = mod as any;
+  const data = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+  return parsePdfWithPdfjs(data);
+}
+
+async function parsePdfWithPdfjs(data: Uint8Array): Promise<string> {
+  type PdfPage = { getTextContent: () => Promise<{ items: Array<{ str?: string }> }> };
+  type PdfDoc = {
+    numPages: number;
+    getPage: (n: number) => Promise<PdfPage>;
+    destroy?: () => Promise<void>;
+  };
+  const pdfjs = (await import("pdfjs-dist/legacy/build/pdf.mjs")) as unknown as {
+    getDocument: (opts: unknown) => { promise: Promise<PdfDoc> };
+    GlobalWorkerOptions?: { workerSrc?: string | false };
+  };
+  // pdfjs 在 Node 下默认会尝试 fake worker；显式关闭，强制主线程解析。
+  // 注意：必须设为 false（而不是空字符串），否则仍会抛 "No workerSrc specified"。
   try {
-    const GlobalWorkerOptions = pdfjs.GlobalWorkerOptions as
-      | { workerSrc?: string }
-      | undefined;
-    if (GlobalWorkerOptions) {
-      GlobalWorkerOptions.workerSrc = "";
+    if (pdfjs.GlobalWorkerOptions) {
+      pdfjs.GlobalWorkerOptions.workerSrc = false;
     }
   } catch {
     // ignore
   }
-  const data = new Uint8Array(
-    buffer.buffer,
-    buffer.byteOffset,
-    buffer.byteLength,
-  );
-  const task = pdfjs.getDocument({ data, useSystemFonts: true });
+  const task = pdfjs.getDocument({ data, useSystemFonts: true, isEvalSupported: false });
   const pdf = await task.promise;
   const pages = Math.min(pdf.numPages ?? 0, MAX_PAGES);
   const parts: string[] = [];
