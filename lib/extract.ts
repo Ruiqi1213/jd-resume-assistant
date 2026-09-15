@@ -1,4 +1,5 @@
 import mammoth from "mammoth";
+import { PDFParse } from "pdf-parse";
 
 const MAX_PAGES = 20;
 const MAX_EXTRACT_CHARS = 50000;
@@ -30,51 +31,12 @@ export function detectKind(filename: string, mime: string): ParseKind {
 }
 
 export async function parsePdfBuffer(buffer: Buffer): Promise<string> {
-  const data = new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
-  return parsePdfWithPdfjs(data);
-}
-
-async function parsePdfWithPdfjs(data: Uint8Array): Promise<string> {
-  type PdfPage = { getTextContent: () => Promise<{ items: Array<{ str?: string }> }> };
-  type PdfDoc = {
-    numPages: number;
-    getPage: (n: number) => Promise<PdfPage>;
-    destroy?: () => Promise<void>;
-  };
-  const pdfjs = (await import("pdfjs-dist/legacy/build/pdf.mjs")) as unknown as {
-    getDocument: (opts: unknown) => { promise: Promise<PdfDoc> };
-    GlobalWorkerOptions?: { workerSrc?: string | false };
-  };
-  // pdfjs 在 Node 下默认会尝试 fake worker；显式关闭，强制主线程解析。
-  // 注意：必须设为 false（而不是空字符串），否则仍会抛 "No workerSrc specified"。
-  try {
-    if (pdfjs.GlobalWorkerOptions) {
-      pdfjs.GlobalWorkerOptions.workerSrc = false;
-    }
-  } catch {
-    // ignore
-  }
-  const task = pdfjs.getDocument({ data, useSystemFonts: true, isEvalSupported: false });
-  const pdf = await task.promise;
-  const pages = Math.min(pdf.numPages ?? 0, MAX_PAGES);
-  const parts: string[] = [];
-  for (let i = 1; i <= pages; i++) {
-    const page = await pdf.getPage(i);
-    const content = await page.getTextContent();
-    const line = (content.items as Array<{ str?: string }>)
-      .map((it) => (typeof it.str === "string" ? it.str : ""))
-      .join(" ");
-    parts.push(line);
-  }
-  try {
-    await pdf.destroy?.();
-  } catch {
-    // ignore
-  }
-  let text = parts.join("\n").replace(/\r/g, "").trim();
-  if (pdf.numPages > MAX_PAGES) {
-    text += `\n\n[注：PDF共${pdf.numPages}页，仅解析前${MAX_PAGES}页]`;
-  }
+  // pdf-parse：纯 Node 解析，无 worker、无 canvas，适合 Vercel serverless
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+  const result = await parser.getText();
+  await parser.destroy().catch(() => undefined);
+  let text = (result.text || "").replace(/\r/g, "").trim();
+  if (!text) return "";
   return text.slice(0, MAX_EXTRACT_CHARS);
 }
 
