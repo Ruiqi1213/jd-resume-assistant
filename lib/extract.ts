@@ -30,9 +30,20 @@ export function detectKind(filename: string, mime: string): ParseKind {
 }
 
 export async function parsePdfBuffer(buffer: Buffer): Promise<string> {
+  // 服务端禁用 worker：Vercel 等 serverless 环境没有 worker 文件，主线程解析即可
   const mod = await import("pdfjs-dist/legacy/build/pdf.mjs");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const pdfjs = mod as any;
+  try {
+    const GlobalWorkerOptions = pdfjs.GlobalWorkerOptions as
+      | { workerSrc?: string }
+      | undefined;
+    if (GlobalWorkerOptions) {
+      GlobalWorkerOptions.workerSrc = "";
+    }
+  } catch {
+    // ignore
+  }
   const data = new Uint8Array(
     buffer.buffer,
     buffer.byteOffset,
