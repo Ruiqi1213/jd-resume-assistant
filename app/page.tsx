@@ -1,6 +1,17 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  DEFAULT_MATCH_WEIGHTS,
+  recalculateJobMatch,
+  sortJobMatchesStable,
+  type GapType,
+  type JobMatchAnalysis,
+  type MatchDimension,
+  type MatchWeights,
+  type RequirementImportance,
+  type RequirementStatus,
+} from "@/lib/match";
 
 type JdInfo = {
   company: string;
@@ -29,7 +40,7 @@ type GenerateResult = {
 
 type FocusOption = { id: string; title: string; angle: string; why: string };
 type Tone = "sincere" | "professional" | "lively";
-type Busy = "extract" | "parse" | "greeting" | "focus" | null;
+type Busy = "extract" | "parse" | "match" | "greeting" | "focus" | null;
 type Msg = { kind: "ok" | "warn" | "err"; text: string };
 
 type DocItem = { id: string; name: string; text: string };
@@ -46,6 +57,35 @@ const JD_ACCEPT = ".pdf,.docx,.txt,.md,.png,.jpg,.jpeg,.webp";
 const IMAGE_EXT = /\.(png|jpe?g|webp)$/i;
 const MAX_RESUME_FILES = 5;
 const MAX_JD_FILES = 12;
+
+const IMPORTANCE_LABEL: Record<RequirementImportance, string> = {
+  hard: "硬性条件",
+  core: "核心能力",
+  bonus: "加分项",
+};
+
+const STATUS_LABEL: Record<RequirementStatus, string> = {
+  met: "已满足",
+  partial: "部分满足",
+  unmet: "未满足",
+  unknown: "待核实",
+};
+
+const DIMENSION_LABEL: Record<MatchDimension, string> = {
+  eligibility: "校招资格",
+  product: "产品基本功",
+  ai: "AI产品能力",
+  evaluation: "评测与数据",
+  delivery: "交付与结果",
+  design_domain: "设计/行业经验",
+};
+
+const GAP_LABEL: Record<GapType, string> = {
+  none: "证据充分",
+  resume_optimization: "可通过简历优化",
+  capability_gap: "能力/经历缺口",
+  needs_verification: "需要核实",
+};
 
 function uid(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
@@ -137,6 +177,10 @@ export default function Home() {
   const [jobLoading, setJobLoading] = useState<Record<string, boolean>>({});
   const [focusOptions, setFocusOptions] = useState<FocusOption[]>([]);
   const [selectedFocus, setSelectedFocus] = useState<string>("");
+  const [matchAnalyses, setMatchAnalyses] = useState<Record<string, JobMatchAnalysis>>({});
+  const [matchErrors, setMatchErrors] = useState<Record<string, string>>({});
+  const [matchWeights, setMatchWeights] = useState<MatchWeights>({ ...DEFAULT_MATCH_WEIGHTS });
+  const [expandedMatchId, setExpandedMatchId] = useState<string>("");
 
   const [busy, setBusy] = useState<Busy>(null);
   const [batchBusy, setBatchBusy] = useState(false);
@@ -162,6 +206,13 @@ export default function Home() {
     () => Object.values(jobLoading).filter(Boolean).length,
     [jobLoading],
   );
+  const rankedMatches = useMemo(
+    () =>
+      sortJobMatchesStable(
+        Object.values(matchAnalyses).map((analysis) => recalculateJobMatch(analysis, matchWeights)),
+      ),
+    [matchAnalyses, matchWeights],
+  );
 
   const canParse = useMemo(
     () => resumes.length > 0 || jds.length > 0,
@@ -176,10 +227,11 @@ export default function Home() {
     return {
       input: resumes.length > 0 || jds.length > 0,
       parsed: !!resumeProfile || Object.keys(jdInfos).length > 0,
+      matched: rankedMatches.length > 0,
       focusReady: focusOptions.length > 0 || !!extraFocus.trim() || !!direction.trim(),
       done: doneCount > 0,
     };
-  }, [resumes, jds, resumeProfile, jdInfos, focusOptions, extraFocus, direction, doneCount]);
+  }, [resumes, jds, resumeProfile, jdInfos, rankedMatches, focusOptions, extraFocus, direction, doneCount]);
 
   function show(kind: Msg["kind"], text: string) {
     setMessage({ kind, text });
@@ -215,6 +267,13 @@ export default function Home() {
       })
       .catch(() => undefined);
   }, []);
+
+  // 匹配证据与当前简历绑定，切换简历后必须重新分析，避免混用旧结论。
+  useEffect(() => {
+    setMatchAnalyses({});
+    setMatchErrors({});
+    setExpandedMatchId("");
+  }, [activeResumeId]);
 
   async function handleUnlock() {
     const code = codeDraft.trim();
@@ -407,6 +466,8 @@ export default function Home() {
         map[j.id] = infos[i] || null;
       });
       setJdInfos(map);
+      setMatchAnalyses({});
+      setMatchErrors({});
       if (typeof json.remaining === "number") setRemaining(json.remaining);
       show("ok", `结构化解析完成：简历画像 1 份，JD ${infos.length} 条。`);
     } catch (e) {
@@ -414,6 +475,52 @@ export default function Home() {
     } finally {
       setBusy(null);
     }
+  }
+
+  async function handleMatchAnalysis() {
+    if (!activeResume || activeResume.text.trim().length < 10 || checkedJds.length === 0) {
+      show("warn", "岗位匹配分析需要：1 份当前简历 + 至少勾选 1 条 JD。");
+      return;
+    }
+    setBusy("match");
+    setMessage(null);
+    setMatchErrors({});
+    try {
+      const res = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...authHeaders() },
+        body: JSON.stringify({
+          accessCode,
+          resumeText: activeResume.text,
+          jobs: checkedJds.map((jd) => ({ id: jd.id, jd: jdInfos[jd.id] || jd.text })),
+        }),
+      });
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(json.error || `匹配分析失败(${res.status})`);
+      const analyses: JobMatchAnalysis[] = Array.isArray(json.analyses) ? json.analyses : [];
+      setMatchAnalyses(Object.fromEntries(analyses.map((analysis) => [analysis.jobId, analysis])));
+      setMatchErrors(json.errors && typeof json.errors === "object" ? json.errors : {});
+      if (json.weights) setMatchWeights(json.weights);
+      if (analyses[0]) setExpandedMatchId(analyses[0].jobId);
+      if (typeof json.remaining === "number") setRemaining(json.remaining);
+      const failed = Object.keys(json.errors || {}).length;
+      show(
+        failed ? "warn" : "ok",
+        failed
+          ? `完成 ${analyses.length} 个岗位的排序，其中 ${failed} 个岗位需重新分析。`
+          : `已按统一标准分析并排序 ${analyses.length} 个岗位。`,
+      );
+    } catch (e) {
+      show("err", e instanceof Error ? e.message : "岗位匹配分析失败");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  function updateMatchWeight(key: keyof MatchWeights, value: string) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return;
+    setMatchWeights((current) => ({ ...current, [key]: Math.max(0, Math.min(100, Math.round(parsed))) }));
   }
 
   function focusJdForStrategy(): DocItem | null {
@@ -666,7 +773,7 @@ export default function Home() {
           <div className="logo-mark">招</div>
           <div>
             <div className="brand-name">JD × 简历 · 打招呼助手</div>
-            <div className="brand-sub">批量 JD · 一份简历一次生成多条招呼语</div>
+            <div className="brand-sub">校招岗位匹配排序 · 批量生成专属招呼语</div>
           </div>
           <span className={`quota-pill ${remaining === null ? "dim" : ""}`}>
             {remaining === null ? "配额未使用" : `本小时剩余 ${remaining} 次`}
@@ -675,17 +782,17 @@ export default function Home() {
       </nav>
       <div className="page">
         <header className="hero">
-          <h1>一次截图多个岗位，一键生成每条招呼语</h1>
+          <h1>先比较岗位，再决定优先投哪一个</h1>
           <p>
-            上传 1 份简历 + 多张 JD 截图（或粘贴多条 JD），自动 OCR 与结构化解析，
-            选好语气后批量生成每条岗位的专属打招呼私信，逐条复制投递。
+            上传多份简历和一批 JD，用统一标准核对硬性条件、核心能力与简历证据，
+            得到可解释的投递排序后，再批量生成每个岗位的专属打招呼私信。
           </p>
           <div className="hero-badges">
             <span>多截图批量 OCR</span>
             <span>多 JD 批量解析</span>
+            <span>可调权重匹配排序</span>
+            <span>原文证据可核对</span>
             <span>逐条专属生成</span>
-            <span>3 档语气风格</span>
-            <span>一键复制全部</span>
           </div>
         </header>
 
@@ -693,8 +800,9 @@ export default function Home() {
           {[
             { done: stepState.input, t: "① 输入", s: `${resumes.length} 份简历 · ${jds.length} 条JD` },
             { done: stepState.parsed, t: "② 解析", s: "画像 + JD 结构化" },
-            { done: stepState.focusReady, t: "③ 策略", s: "侧重点 / 语气" },
-            { done: stepState.done, t: "④ 批量生成", s: `${doneCount} 条已生成` },
+            { done: stepState.matched, t: "③ 匹配", s: `${rankedMatches.length} 个岗位已排序` },
+            { done: stepState.focusReady, t: "④ 策略", s: "侧重点 / 语气" },
+            { done: stepState.done, t: "⑤ 生成", s: `${doneCount} 条已生成` },
           ].map((x, i) => (
             <div className={`step-item ${x.done ? "done" : ""}`} key={i}>
               <div className="step-dot">{x.done ? "✓" : i + 1}</div>
@@ -785,11 +893,13 @@ export default function Home() {
                 </div>
                 <textarea
                   value={activeResume.text}
-                  onChange={(e) =>
+                  onChange={(e) => {
                     setResumes((prev) =>
                       prev.map((x) => (x.id === activeResume.id ? { ...x, text: e.target.value } : x)),
-                    )
-                  }
+                    );
+                    setMatchAnalyses({});
+                    setMatchErrors({});
+                  }}
                 />
               </>
             )}
@@ -837,6 +947,11 @@ export default function Home() {
                         e.stopPropagation();
                         setJds((prev) => prev.filter((x) => x.id !== j.id));
                         setCheckedJdIds((prev) => prev.filter((x) => x !== j.id));
+                        setMatchAnalyses((prev) => {
+                          const next = { ...prev };
+                          delete next[j.id];
+                          return next;
+                        });
                       }}
                     >
                       删除
@@ -846,11 +961,16 @@ export default function Home() {
                     <textarea
                       className="inline-edit"
                       value={j.text}
-                      onChange={(e) =>
+                      onChange={(e) => {
                         setJds((prev) =>
                           prev.map((x) => (x.id === j.id ? { ...x, text: e.target.value } : x)),
-                        )
-                      }
+                        );
+                        setMatchAnalyses((prev) => {
+                          const next = { ...prev };
+                          delete next[j.id];
+                          return next;
+                        });
+                      }}
                     />
                   )}
                 </div>
@@ -968,7 +1088,7 @@ export default function Home() {
 
             <section className="card">
               <div className="card-head">
-                <div className="card-num">3</div>
+                <div className="card-num">5</div>
                 <div>
                   <h2>批量结果（{doneCount}/{jds.length}）</h2>
                   <p>每条 JD 独立生成，可逐条复制或一键复制全部。</p>
@@ -1055,6 +1175,164 @@ export default function Home() {
             </section>
           </div>
         </div>
+
+        <section className="card match-card" style={{ marginTop: 16 }}>
+          <div className="card-head match-head">
+            <div className="card-num">3</div>
+            <div>
+              <h2>岗位匹配排行 · 2027届校招</h2>
+              <p>逐项核对硬性条件、核心能力、简历证据与缺口，再给出投递优先级。</p>
+            </div>
+            <button
+              className="btn btn-primary match-run"
+              disabled={busy !== null || !canBatch}
+              onClick={handleMatchAnalysis}
+            >
+              {busy === "match" && <span className="spinner" />}
+              {busy === "match" ? "分析排序中…" : `分析已勾选岗位（${checkedJds.length}）`}
+            </button>
+          </div>
+
+          <div className="score-note">
+            <strong>这里的分数是“岗位要求覆盖分”</strong>
+            <span>，用于比较当前简历与各 JD 的证据覆盖程度，不是录用概率。模型只负责逐项归类，分数和排序由下方公开规则计算。</span>
+          </div>
+
+          <div className="weight-panel">
+            <div>
+              <strong>评分权重</strong>
+              <span>同一套权重应用于全部岗位；修改后立即重新计算，不会重新调用模型。</span>
+            </div>
+            {(["hard", "core", "bonus"] as RequirementImportance[]).map((key) => (
+              <label className="weight-control" key={key}>
+                <span>{IMPORTANCE_LABEL[key]}</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={matchWeights[key]}
+                  onChange={(e) => updateMatchWeight(key, e.target.value)}
+                />
+              </label>
+            ))}
+            <button
+              className="mini-btn"
+              onClick={() => setMatchWeights({ ...DEFAULT_MATCH_WEIGHTS })}
+            >
+              恢复默认 50/35/15
+            </button>
+          </div>
+
+          {rankedMatches.length === 0 && busy !== "match" && (
+            <div className="empty match-empty">
+              <span className="big">📊</span>
+              勾选需要比较的岗位，点击“分析已勾选岗位”
+              <br />
+              结构化解析不是前置条件，直接粘贴 JD 也可以分析
+            </div>
+          )}
+
+          {busy === "match" && (
+            <div className="match-loading">
+              <div className="skeleton" style={{ width: "42%" }} />
+              <div className="skeleton" />
+              <div className="skeleton" style={{ width: "78%" }} />
+            </div>
+          )}
+
+          <div className="match-list">
+            {rankedMatches.map((analysis, index) => {
+              const open = expandedMatchId === analysis.jobId;
+              const analysisError = matchErrors[analysis.jobId];
+              return (
+                <article className={`match-item ${open ? "open" : ""}`} key={analysis.jobId}>
+                  <button
+                    type="button"
+                    className="match-summary"
+                    onClick={() => setExpandedMatchId((current) => (current === analysis.jobId ? "" : analysis.jobId))}
+                  >
+                    <span className="rank-num">{index + 1}</span>
+                    <span className="score-box">
+                      <strong>{analysis.score.total}</strong>
+                      <small>覆盖分</small>
+                    </span>
+                    <span className="match-title">
+                      <strong>{analysis.company} · {analysis.position}</strong>
+                      <small>{analysis.summary}</small>
+                    </span>
+                    <span className={`priority-pill priority-${analysis.priority.level}`}>
+                      {analysis.priority.label}
+                    </span>
+                    <span className="hard-state">
+                      {analysis.score.hardUnmet > 0
+                        ? `${analysis.score.hardUnmet} 项硬性缺口`
+                        : analysis.score.hardUnknown > 0
+                          ? `${analysis.score.hardUnknown} 项硬性待核实`
+                          : "未发现硬性缺口"}
+                    </span>
+                    <span className="expand-mark">{open ? "收起" : "查看依据"}</span>
+                  </button>
+
+                  {open && (
+                    <div className="match-detail">
+                      {analysisError && (
+                        <div className="notice warn">该岗位本次模型分析未完成：{analysisError}。下方为待核实的 JD 原始要求。</div>
+                      )}
+                      <div className="priority-reason">
+                        <strong>{analysis.priority.label}：</strong>{analysis.priority.reason}
+                      </div>
+                      <div className="coverage-grid">
+                        {(["hard", "core", "bonus"] as RequirementImportance[]).map((key) => {
+                          const value = analysis.score.categoryCoverage[key];
+                          return (
+                            <div className="coverage-card" key={key}>
+                              <span>{IMPORTANCE_LABEL[key]}</span>
+                              <strong>{value === null ? "未涉及" : `${value}%`}</strong>
+                              <div className="coverage-track">
+                                <i style={{ width: `${value || 0}%` }} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                        <div className="coverage-card counts">
+                          <span>逐项结果</span>
+                          <strong>{analysis.score.matched} 满足 · {analysis.score.partial} 部分 · {analysis.score.unmet} 缺口 · {analysis.score.unknown} 待核实</strong>
+                        </div>
+                      </div>
+
+                      <div className="requirement-list">
+                        {analysis.requirements.map((item) => (
+                          <div className={`requirement-item status-${item.status}`} key={item.id}>
+                            <div className="requirement-tags">
+                              <span className={`importance importance-${item.importance}`}>{IMPORTANCE_LABEL[item.importance]}</span>
+                              <span>{DIMENSION_LABEL[item.dimension]}</span>
+                              <span className={`req-status req-status-${item.status}`}>{STATUS_LABEL[item.status]}</span>
+                              <span className={`gap gap-${item.gapType}`}>{GAP_LABEL[item.gapType]}</span>
+                            </div>
+                            <h3>{item.requirement}</h3>
+                            <div className="evidence-block">
+                              <strong>简历证据</strong>
+                              {item.evidence.length > 0 ? (
+                                <ul>
+                                  {item.evidence.map((evidence) => (
+                                    <li key={evidence.ref}><code>{evidence.ref}</code>{evidence.text}</li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <p>未找到可核对的简历原文证据。</p>
+                              )}
+                            </div>
+                            <div className="match-action"><strong>下一步：</strong>{item.action}</div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </article>
+              );
+            })}
+          </div>
+        </section>
 
         <section className="card" style={{ marginTop: 16 }}>
           <div className="card-head">
@@ -1172,7 +1450,7 @@ export default function Home() {
         </section>
 
         <p className="footer">
-          简历与 JD 文本仅用于本次生成，不做持久化存储 · 图片 JD 需在 .env.local 配置视觉模型 · 超长文本自动截断 · 批量生成逐条调用模型，注意配额消耗
+          简历与 JD 文本仅用于本次分析与生成，不做持久化存储 · 匹配分表示证据覆盖程度，不代表录用概率 · 图片 JD 需配置视觉模型 · 批量分析与生成会逐条调用模型，请留意配额
         </p>
       </div>
     </>
