@@ -4,12 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && node scripts/check-extract-build.mjs",
     "start": "next start",
     "lint": "next lint",
     "test": "vitest run"
   },
   "dependencies": {
+    "@napi-rs/canvas": "0.1.80",
     "@upstash/redis": "^1.38.4",
     "mammoth": "^1.8.0",
     "next": "^15.1.0",

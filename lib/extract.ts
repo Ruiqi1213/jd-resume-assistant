@@ -1,5 +1,4 @@
 import mammoth from "mammoth";
-import { PDFParse } from "pdf-parse";
 
 const MAX_PAGES = 20;
 const MAX_EXTRACT_CHARS = 50000;
@@ -31,13 +30,17 @@ export function detectKind(filename: string, mime: string): ParseKind {
 }
 
 export async function parsePdfBuffer(buffer: Buffer): Promise<string> {
-  // pdf-parse：纯 Node 解析，无 worker、无 canvas，适合 Vercel serverless
+  // Keep pdf-parse external to the Next bundle so its worker resolves correctly.
+  // Loading a PDF dependency must not take down TXT/DOCX/image extraction.
+  const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: new Uint8Array(buffer) });
-  const result = await parser.getText();
-  await parser.destroy().catch(() => undefined);
-  let text = (result.text || "").replace(/\r/g, "").trim();
-  if (!text) return "";
-  return text.slice(0, MAX_EXTRACT_CHARS);
+  try {
+    const result = await parser.getText({ first: MAX_PAGES });
+    const text = result.pages.map((page) => page.text).join("\n\n").replace(/\r/g, "").trim();
+    return text.slice(0, MAX_EXTRACT_CHARS);
+  } finally {
+    await parser.destroy().catch(() => undefined);
+  }
 }
 
 export async function parseDocxBuffer(buffer: Buffer): Promise<string> {

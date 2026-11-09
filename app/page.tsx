@@ -359,12 +359,16 @@ export default function Home() {
         setJds((prev) => [...prev, ...newJds]);
         setCheckedJdIds((prev) => [...prev, ...newJds.map((x) => x.id)]);
       }
-      setResumeFiles([]);
-      setJdFiles([]);
+      const failures: Array<{ slot: "resume" | "jd"; index: number }> = Array.isArray(json.failures) ? json.failures : [];
+      const importedResumes = new Set(resumeFiles.filter((_, i) => !failures.some((f) => f.slot === "resume" && f.index === i)));
+      const importedJds = new Set(jdFiles.filter((_, i) => !failures.some((f) => f.slot === "jd" && f.index === i)));
+      // Keep failed files for retry; do not import successful files a second time.
+      setResumeFiles((prev) => prev.filter((f) => !importedResumes.has(f)));
+      setJdFiles((prev) => prev.filter((f) => !importedJds.has(f)));
       if (typeof json.remaining === "number") setRemaining(json.remaining);
       const warns: string[] = Array.isArray(json.warnings) ? json.warnings : [];
       show(
-        "ok",
+        warns.length ? "warn" : "ok",
         `文件解析完成：简历 ${newResumes.length} 份，JD ${newJds.length} 条${warns.length ? "；" + warns.join("；") : ""}${
           newResumes.length + newJds.length === 0 ? "（但未提取到文字，扫描件请改用截图或粘贴）" : ""
         }`,

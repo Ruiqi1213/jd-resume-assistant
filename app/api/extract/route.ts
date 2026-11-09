@@ -18,7 +18,7 @@ function collectFiles(form: FormData, names: string[]): File[] {
   const out: File[] = [];
   for (const n of names) {
     for (const v of form.getAll(n)) {
-      if (v instanceof File && v.size > 0) out.push(v);
+      if (v instanceof File) out.push(v);
     }
   }
   return out;
@@ -32,7 +32,7 @@ async function readImageDataUrl(file: File): Promise<string> {
 
 async function ocrImageFile(file: File): Promise<string> {
   const { apiKey, baseUrl, model } = visionConfig();
-  if (!apiKey) throw new Error(`图片 ${file.name} 识别需要配置 VISION_API_KEY`);
+  if (!apiKey) throw new Error("截图识别尚未配置，请联系网站维护者设置 VISION_API_KEY；也可以先粘贴 JD 原文");
   const { visionOcrImage } = await import("@/lib/ai-client");
   try {
     return await visionOcrImage({
@@ -103,38 +103,44 @@ export async function POST(req: NextRequest) {
   const warnings: string[] = [];
   const resumes: ExtractedDoc[] = [];
   const jds: ExtractedDoc[] = [];
+  const failures: Array<{ slot: "resume" | "jd"; index: number; name: string; error: string }> = [];
 
-  for (const f of resumeFiles) {
+  for (const [index, f] of resumeFiles.entries()) {
     try {
       const text = clipResume(await parseDocFile(f));
-      if (!text.trim()) warnings.push(`简历 ${f.name} 未提取到文字`);
+      if (!text.trim()) throw new Error("未提取到文字；如果是扫描版 PDF，请改用带文字层的 PDF、DOCX 或粘贴简历原文");
       resumes.push({ name: f.name, text });
     } catch (e) {
-      return NextResponse.json(
-        { error: `简历 ${f.name} 解析失败：${e instanceof Error ? e.message : "未知错误"}` },
-        { status: 400 },
-      );
+      const error = `简历 ${f.name} 解析失败：${e instanceof Error ? e.message : "未知错误"}`;
+      failures.push({ slot: "resume", index, name: f.name, error });
+      warnings.push(error);
     }
   }
 
   // 串行 OCR，避免视觉模型并发限流；文档解析可并行但文件数少，直接串行更稳
-  for (const f of jdFiles) {
+  for (const [index, f] of jdFiles.entries()) {
     try {
       const raw = isImageMime(f.type, f.name) ? await ocrImageFile(f) : await parseDocFile(f);
       const text = clipJd(raw.trim());
-      if (!text.trim()) warnings.push(`JD ${f.name} 未提取到文字`);
+      if (!text.trim()) throw new Error("未提取到文字，请换用清晰截图、带文字层的文件或粘贴 JD 原文");
       jds.push({ name: f.name, text });
     } catch (e) {
-      return NextResponse.json(
-        { error: `JD ${f.name} 解析失败：${e instanceof Error ? e.message : "未知错误"}` },
-        { status: 400 },
-      );
+      const error = `JD ${f.name} 解析失败：${e instanceof Error ? e.message : "未知错误"}`;
+      failures.push({ slot: "jd", index, name: f.name, error });
+      warnings.push(error);
     }
   }
 
   const pastedJd = typeof jdTextRaw === "string" ? jdTextRaw.trim() : "";
   if (pastedJd) {
     jds.push({ name: "粘贴的JD文本", text: clipJd(pastedJd) });
+  }
+
+  if (!resumes.length && !jds.length) {
+    return NextResponse.json(
+      { error: warnings.join("；") || "请选择文件或粘贴 JD 原文", failures, remaining: rl.remaining },
+      { status: 400 },
+    );
   }
 
   if (resumes.some((r) => r.text.length > 7000)) {
@@ -146,6 +152,7 @@ export async function POST(req: NextRequest) {
     resumes,
     jds,
     warnings,
+    failures,
     remaining: rl.remaining,
     // 兼容旧前端：首份文档
     resumeText: resumes[0]?.text || "",
