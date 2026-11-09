@@ -247,3 +247,22 @@ describe("single-page work flow", () => {
     );
   });
 });
+
+it("opens directly, keeps optional settings before generate, and attaches JD without a drawer", async () => {
+  await openWorkspace();
+  expect(requests.some(r => r.url === "/api/verify")).toBe(false);
+  expect(screen.queryByLabelText("访问口令")).toBeNull();
+  const generate = screen.getByRole("button", { name: "生成打招呼语" });
+  expect(document.querySelector(".preferences")!.compareDocumentPosition(generate) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  const fileInput = document.querySelector<HTMLInputElement>('input[accept*=".png"]')!;
+  const picker = vi.spyOn(fileInput, "click");
+  fireEvent.click(screen.getByRole("button", { name: "添加岗位截图 / 文件" }));
+  expect(picker).toHaveBeenCalledOnce();
+  expect(document.querySelector("dialog")!.open).toBe(false);
+  fireEvent.click(screen.getByText("粘贴简历文字（可选）"));
+  fireEvent.change(screen.getByLabelText("简历文字"), {target:{value:"负责产品运营及社群活动。"}});
+  fireEvent.click(screen.getByRole("button", {name:"保存简历文字"}));
+  expect(document.querySelector("dialog")!.open).toBe(false);
+  expect(JSON.parse(localStorage.getItem(MATERIALS_KEY)!).resumes[0].text).toContain("产品运营");
+});
+

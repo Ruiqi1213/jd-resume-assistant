@@ -26,7 +26,6 @@ type Job = DocumentItem & {
 };
 type Notice = { kind: "ok" | "warn" | "error"; text: string };
 type ProfileState = { source: string; data: ResumeProfile };
-const CODE_KEY = "jd-assistant-access-code";
 const uid = () => crypto.randomUUID();
 const tones: Array<[GreetingTone, string]> = [
   ["sincere", "真诚自然"],
@@ -68,11 +67,6 @@ function Icon({
 }
 
 export default function Workspace() {
-  const [unlocked, setUnlocked] = useState(false);
-  const [checking, setChecking] = useState(true);
-  const [accessCode, setAccessCode] = useState("");
-  const [codeDraft, setCodeDraft] = useState("");
-  const [gateError, setGateError] = useState("");
   const [materials, setMaterials] = useState<Materials>({
     resumes: [],
     facts: [],
@@ -120,38 +114,6 @@ export default function Workspace() {
   const isBusy = busy !== null;
 
   useEffect(() => {
-    let saved = "";
-    try {
-      saved = localStorage.getItem(CODE_KEY) || "";
-    } catch {
-      /* private browsing */
-    }
-    const abort = new AbortController();
-    fetch("/api/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ accessCode: saved }),
-      signal: abort.signal,
-    })
-      .then(async (res) => {
-        const data = await res.json();
-        if (res.ok && data.ok) {
-          setAccessCode(saved);
-          setUnlocked(true);
-        }
-      })
-      .catch((error) => {
-        if (error.name !== "AbortError")
-          setGateError("暂时无法连接服务，请输入口令重试。");
-      })
-      .finally(() => {
-        if (!abort.signal.aborted) setChecking(false);
-      });
-    return () => abort.abort();
-  }, []);
-
-  useEffect(() => {
-    if (!unlocked) return;
     try {
       setMaterials(restoreMaterials(localStorage.getItem(MATERIALS_KEY)));
       const saved = JSON.parse(
@@ -166,7 +128,7 @@ export default function Workspace() {
       setStorageError("浏览器存储不可用，本次资料仅在当前页面保留。");
     }
     setRestored(true);
-  }, [unlocked]);
+  }, []);
 
   useEffect(() => {
     if (!restored) return;
@@ -187,12 +149,7 @@ export default function Workspace() {
   }, [materials, profile, profileSource, restored]);
 
   useEffect(() => {
-    if (
-      !restored ||
-      !unlocked ||
-      !profileSource ||
-      profile?.source === profileSource
-    )
+    if (!restored || !profileSource || profile?.source === profileSource)
       return;
     const abort = new AbortController();
     setProfileStatus("正在自动整理资料…");
@@ -202,7 +159,6 @@ export default function Workspace() {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
-            "x-access-code": accessCode,
           },
           body: JSON.stringify({ resumeText: profileSource }),
           signal: abort.signal,
@@ -225,14 +181,7 @@ export default function Workspace() {
       clearTimeout(timer);
       abort.abort();
     };
-  }, [
-    restored,
-    unlocked,
-    accessCode,
-    profileSource,
-    profile?.source,
-    profileRetry,
-  ]);
+  }, [restored, profileSource, profile?.source, profileRetry]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -255,7 +204,6 @@ export default function Workspace() {
     const res = await fetch(path, {
       method: "POST",
       headers: {
-        "x-access-code": accessCode,
         ...(!form ? { "Content-Type": "application/json" } : {}),
       },
       body: form ? body : JSON.stringify(body),
@@ -265,28 +213,6 @@ export default function Workspace() {
     if (!res.ok)
       throw new Error(data.error || `请求失败（${res.status}），请稍后重试。`);
     return data;
-  }
-
-  async function unlock() {
-    setChecking(true);
-    setGateError("");
-    try {
-      const data = await request("/api/verify", {
-        accessCode: codeDraft.trim(),
-      });
-      if (!data.ok) throw new Error("口令不正确");
-      setAccessCode(codeDraft.trim());
-      setUnlocked(true);
-      try {
-        localStorage.setItem(CODE_KEY, codeDraft.trim());
-      } catch {
-        /* session still works */
-      }
-    } catch (error) {
-      setGateError(error instanceof Error ? error.message : "无法进入");
-    } finally {
-      setChecking(false);
-    }
   }
 
   function addFiles(slot: "jd" | "resume", files: File[]) {
@@ -605,45 +531,6 @@ export default function Workspace() {
     );
   }
 
-  if (!unlocked)
-    return (
-      <div className="gate-shell">
-        <div className="brand">
-          <span className="brand-mark">招</span>
-          <strong>JD × 简历</strong>
-        </div>
-        <section className="gate-card">
-          <h1>打招呼助手</h1>
-          <p>把你的经历，写成一句合适的开场白。</p>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              void unlock();
-            }}
-          >
-            <label htmlFor="access-code">访问口令</label>
-            <input
-              id="access-code"
-              type="password"
-              value={codeDraft}
-              onChange={(e) => setCodeDraft(e.target.value)}
-              autoComplete="current-password"
-              placeholder="输入原访问口令"
-            />
-            <button className="primary-button" disabled={checking}>
-              {checking ? "正在连接…" : "进入工作区"}
-              <Icon name="arrow" />
-            </button>
-          </form>
-          {gateError && (
-            <p role="alert" className="error-text">
-              {gateError}
-            </p>
-          )}
-        </section>
-      </div>
-    );
-
   return (
     <>
       <header className="app-header">
@@ -670,20 +557,6 @@ export default function Workspace() {
           <h1>你想投递什么岗位？</h1>
           <p>把 JD 放进来，让开场白更贴合你和这个机会。</p>
         </div>
-        {!profileSource && (
-          <div className="resume-invite">
-            <div>
-              <Icon name="folder" />
-              <span>
-                添加简历，让表达更贴合你
-                <span className="invite-detail"> · 可一次上传多份</span>
-              </span>
-            </div>
-            <button className="text-button" onClick={() => setDrawerOpen(true)}>
-              添加简历 <Icon name="plus" size={16} />
-            </button>
-          </div>
-        )}
         <section
           className={`composer ${dragging ? "dragging" : ""} ${jdError ? "invalid" : ""}`}
           aria-label="岗位输入"
@@ -738,7 +611,7 @@ export default function Workspace() {
                 onClick={() => jdFileRef.current?.click()}
               >
                 <Icon name="clip" size={18} />
-                添加附件
+                添加岗位截图 / 文件
               </button>
               <span id="jd-help" className="input-hint">
                 多岗位可用 --- 分隔
@@ -755,22 +628,6 @@ export default function Workspace() {
                 }}
               />
             </div>
-            <button
-              className="primary-button"
-              disabled={isBusy}
-              onClick={() => void generate()}
-            >
-              {isBusy ? (
-                <span className="spinner" />
-              ) : (
-                <Icon name="spark" size={18} />
-              )}
-              {isBusy
-                ? busy?.startsWith("生成")
-                  ? busy
-                  : "处理中…"
-                : "生成打招呼语"}
-            </button>
           </div>
         </section>
         {jdError && (
@@ -786,6 +643,50 @@ export default function Workspace() {
           </span>
           {remaining !== null && <span>本小时剩余 {remaining} 次</span>}
         </div>
+        <section className="inline-materials" aria-label="本次参考资料">
+          <div className="inline-materials-row">
+            <span>
+              {materials.resumes.length
+                ? `已保存 ${materials.resumes.length} 份简历，将自动参考`
+                : "添加简历，让表达更贴合你（可选）"}
+            </span>
+            <button
+              className="secondary-button"
+              disabled={isBusy}
+              onClick={() => resumeFileRef.current?.click()}
+            >
+              上传简历
+            </button>
+          </div>
+          {fileChips(resumeFiles, "resume")}
+          {resumeFiles.length > 0 && (
+            <button
+              className="text-button"
+              disabled={isBusy}
+              onClick={() => void importResumes()}
+            >
+              重试读取简历
+            </button>
+          )}
+          <details className="paste-resume">
+            <summary>粘贴简历文字（可选）</summary>
+            <label htmlFor="inline-resume">简历文字</label>
+            <textarea
+              id="inline-resume"
+              value={resumeDraft}
+              disabled={isBusy}
+              onChange={(e) => setResumeDraft(e.target.value)}
+              placeholder="粘贴你的经历，也可以只写与岗位有关的内容"
+            />
+            <button
+              className="secondary-button"
+              disabled={isBusy || !resumeDraft.trim()}
+              onClick={saveResumeText}
+            >
+              保存简历文字
+            </button>
+          </details>
+        </section>
         <details className="preferences">
           <summary>
             调整偏好 <span>语气、简历、侧重点 · 可选</span>
@@ -887,6 +788,24 @@ export default function Workspace() {
             </details>
           </div>
         </details>
+        <div className="generate-actions">
+          <button
+            className="primary-button"
+            disabled={isBusy}
+            onClick={() => void generate()}
+          >
+            {isBusy ? (
+              <span className="spinner" />
+            ) : (
+              <Icon name="spark" size={18} />
+            )}
+            {isBusy
+              ? busy?.startsWith("生成")
+                ? busy
+                : "处理中…"
+              : "生成打招呼语"}
+          </button>
+        </div>
         {notice && (
           <div role="status" className={`notice ${notice.kind}`}>
             {notice.text}
