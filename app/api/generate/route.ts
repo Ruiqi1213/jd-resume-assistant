@@ -54,7 +54,7 @@ export async function POST(req: NextRequest) {
   if (!body) return NextResponse.json({ error: "请求体必须是 JSON" }, { status: 400 });
 
   const resumeText = clipResume(String(body.resumeText || ""));
-  if (!resumeText) {
+  if (!resumeText && body.mode === "focus") {
     return NextResponse.json({ error: "缺少简历文本，请先上传或粘贴简历" }, { status: 400 });
   }
 
